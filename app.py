@@ -2,8 +2,11 @@ import importlib
 import json
 import os
 import re
+from datetime import datetime
 from langchain_core.messages import AIMessage, HumanMessage
 import streamlit as st
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Ensure API Key is set BEFORE loading socratic_fsm
 if "GOOGLE_API_KEY" in st.secrets:
@@ -47,7 +50,54 @@ THEME_BANNER_BG = "#ecfdf5"       # Light Emerald Purpose Banner
 THEME_BANNER_BORDER = "#a7f3d0"   # Soft Emerald Border
 THEME_BANNER_TEXT = "#065f46"     # Dark Emerald Banner Text
 
-# --- Helpers ---
+# --- Database & Zero-PII Logging Setup ---
+Base = declarative_base()
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    subject = Column(Text, nullable=False)
+    level = Column(Text, nullable=False)
+    unit = Column(Text, nullable=False)
+    subtopic = Column(Text, nullable=False)
+    app_mode = Column(Text, nullable=False)
+    score_pct = Column(Float, nullable=False)
+    keywords_used = Column(Text, nullable=True)
+    keywords_missed = Column(Text, nullable=True)
+    misconception_flag = Column(Integer, default=0)
+
+def log_session_to_supabase(unit: str, subtopic: str, app_mode: str, score_pct: float, keywords_used: list = None, keywords_missed: list = None, misconception_flag: int = 0):
+    """Logs session metrics statelessly to Supabase activity_logs table."""
+    try:
+        db_url = st.secrets["postgres"]["url"]
+        engine = create_engine(db_url, pool_pre_ping=True)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+
+        kw_used_str = ", ".join([str(k) for k in keywords_used if k]) if keywords_used else None
+        kw_missed_str = ", ".join([str(k) for k in keywords_missed if k]) if keywords_missed else None
+
+        log_entry = ActivityLog(
+            subject=COURSE_TITLE,
+            level=LEVEL,
+            unit=unit or "General",
+            subtopic=subtopic or "General Practice",
+            app_mode=app_mode,
+            score_pct=round(float(score_pct), 1),
+            keywords_used=kw_used_str,
+            keywords_missed=kw_missed_str,
+            misconception_flag=int(misconception_flag)
+        )
+
+        session.add(log_entry)
+        session.commit()
+        session.close()
+    except Exception as e:
+        st.warning(f"⚠️ Telemetry log failed: {e}")
+
+# --- Formatting Helpers ---
 def extract_clean_text(response) -> str:
     if isinstance(response, str):
         return response
@@ -83,7 +133,7 @@ def md_to_html(text: str) -> str:
     text = text.replace('\n', '<br>')
     return re.sub(r'(<br\s*/?>\s*)+', '<br>', text)
 
-# --- CSS Styling (Option Green & Tech High Visibility Override) ---
+# --- CSS Styling ---
 st.markdown(f"""
     <style>
     .stApp {{ background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); }}
@@ -120,7 +170,6 @@ st.markdown(f"""
         background-color: {THEME_PRIMARY} !important;
         border-color: {THEME_PRIMARY} !important;
     }}
-    /* Persistent Solid White Background & High Contrast Border for Text Areas */
     div[data-baseweb="textarea"], 
     div[data-baseweb="textarea"] > div,
     textarea {{
@@ -167,6 +216,8 @@ if "rewrite_results" not in st.session_state:
     st.session_state.rewrite_results = None
 if "student_rewrite_submission" not in st.session_state:
     st.session_state.student_rewrite_submission = ""
+if "logged_sessions" not in st.session_state:
+    st.session_state.logged_sessions = set()
 
 if "graph_state" not in st.session_state:
     st.session_state.graph_state = {
@@ -189,6 +240,7 @@ def reset_session():
     st.session_state.rewrite_data = None
     st.session_state.rewrite_results = None
     st.session_state.student_rewrite_submission = ""
+    st.session_state.logged_sessions = set()
     st.session_state.graph_state = {
         "messages": [], "sub_topic": None, "turn_count": 0, "is_final_turn": False
     }
@@ -234,7 +286,6 @@ if st.session_state.active_topic is None:
 
     st.write("")
 
-    # 4 CS Action Buttons with Tech Icons
     if st.button("🤖 Start a Socratic Session", type="primary", use_container_width=True):
         st.session_state.app_mode = "socratic"
         st.session_state.active_unit = target_unit_name
@@ -330,6 +381,28 @@ elif st.session_state.app_mode == "socratic":
         if len(split_match) > 1:
             st.session_state.messages.append({"role": "tutor", "content": split_match[0].strip(), "style": "tutor-msg"})
             st.session_state.messages.append({"role": "tutor", "content": split_match[1].strip(), "style": "summary-box"})
+            
+            # --- DATABASE LOGGING FOR SOCRATIC COMPLETE ---
+            if "socratic_completed" not in st.session_state.logged_sessions:
+                score_match = re.search(r'Overall Accuracy:\s*(\d+)%', split_match[0])
+                score_pct = float(score_match.group(1)) if score_match else 70.0
+                
+                kw_used_match = re.search(r'Keywords Used Well:\s*\[(.*?)\]', split_match[0])
+                kw_missed_match = re.search(r'Missed Terms to Learn:\s*\[(.*?)\]', split_match[0])
+                
+                used_list = [k.strip() for k in kw_used_match.group(1).split(',')] if kw_used_match else []
+                missed_list = [k.strip() for k in kw_missed_match.group(1).split(',')] if kw_missed_match else []
+                
+                log_session_to_supabase(
+                    unit=st.session_state.active_unit,
+                    subtopic=st.session_state.active_topic,
+                    app_mode="socratic",
+                    score_pct=score_pct,
+                    keywords_used=used_list,
+                    keywords_missed=missed_list,
+                    misconception_flag=1 if score_pct < 45.0 else 0
+                )
+                st.session_state.logged_sessions.add("socratic_completed")
         else:
             st.session_state.messages.append({"role": "tutor", "content": ai_reply, "style": "tutor-msg"})
 
@@ -372,6 +445,25 @@ elif st.session_state.app_mode == "quiz":
                             level=LEVEL
                         )
                         st.session_state.quiz_feedback = feedback
+                        
+                        # --- DATABASE LOGGING FOR QUIZ ---
+                        total_score = feedback.get("total_score", 0)
+                        score_pct = (total_score / len(questions)) * 100.0 if questions else 0.0
+                        
+                        all_used, all_missed = [], []
+                        for item in feedback.get("breakdown", []):
+                            all_used.extend(item.get("keywords_used", []))
+                            all_missed.extend(item.get("keywords_missed", []))
+                            
+                        log_session_to_supabase(
+                            unit=st.session_state.active_unit,
+                            subtopic=st.session_state.active_topic,
+                            app_mode="quiz",
+                            score_pct=score_pct,
+                            keywords_used=all_used,
+                            keywords_missed=all_missed,
+                            misconception_flag=1 if score_pct < 45.0 else 0
+                        )
                         st.rerun()
         else:
             feedback_data = st.session_state.quiz_feedback
@@ -441,13 +533,27 @@ elif st.session_state.app_mode == "extended":
                             level=LEVEL
                         )
                         st.session_state.extended_results = results
+                        
+                        # --- DATABASE LOGGING FOR EXTENDED QUESTION ---
+                        score = results.get("score", 0)
+                        max_score = results.get("max_score", 9)
+                        score_pct = (score / max_score) * 100.0 if max_score > 0 else 0.0
+                        
+                        log_session_to_supabase(
+                            unit=st.session_state.active_unit,
+                            subtopic=st.session_state.active_topic,
+                            app_mode="extended",
+                            score_pct=score_pct,
+                            keywords_used=results.get("keywords_used", []),
+                            keywords_missed=results.get("keywords_missed", []),
+                            misconception_flag=1 if score_pct < 45.0 else 0
+                        )
                         st.rerun()
                 else:
                     st.warning("Please type an answer before submitting.")
         else:
             res = st.session_state.extended_results
             
-            # Display Question & Submitted Response prominent at the top
             with st.expander("📝 Your Submitted Extended Answer", expanded=True):
                 st.markdown(f"**Question:** {q_text}")
                 st.markdown(f"**Your Answer:**\n\n> {st.session_state.get('submitted_extended_answer', '')}")
@@ -500,6 +606,21 @@ elif st.session_state.app_mode == "rewrite":
                             level=LEVEL
                         )
                         st.session_state.rewrite_results = results
+                        
+                        # --- DATABASE LOGGING FOR REWRITE ---
+                        score = results.get("score", 0)
+                        max_score = results.get("max_score", 4)
+                        score_pct = (score / max_score) * 100.0 if max_score > 0 else 0.0
+                        
+                        log_session_to_supabase(
+                            unit=st.session_state.active_unit,
+                            subtopic=st.session_state.active_topic,
+                            app_mode="rewrite",
+                            score_pct=score_pct,
+                            keywords_used=results.get("key_terms_used", []),
+                            keywords_missed=results.get("missed_terms", []),
+                            misconception_flag=1 if score_pct < 45.0 else 0
+                        )
                         st.rerun()
                 else:
                     st.warning("Please type a rewrite before submitting.")

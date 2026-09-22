@@ -30,18 +30,16 @@ class ChatState(TypedDict, total=False):
 
 
 def get_context(sub_topic: str, user_query: str) -> str:
-    """Retrieves relevant specification chunks from local ChromaDB store."""
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         db = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
-        results = db.similarity_search(f"{sub_topic} {user_query}", k=3)
+        results = db.similarity_search(user_query, k=3)
         return "\n\n".join([doc.page_content for doc in results]) if results else ""
     except Exception:
         return "No specific syllabus context found."
 
 
 def extract_clean_text(response) -> str:
-    """Extracts clean text strings from LLM response payload objects."""
     if isinstance(response, str):
         return response
     if hasattr(response, "content"):
@@ -74,14 +72,14 @@ Syllabus Context:
 
 CRITICAL TOPIC BOUNDARY RULE:
 - The student MUST stay focused on the Target Revision Topic: '{sub_topic}'.
-- If the student attempts to switch to an unrelated topic (e.g., bringing up 'SQL databases' or 'networking protocols' when the target topic is 'Data Structures & Algorithms'):
+- If the student attempts to switch to an unrelated or different topic (e.g., bringing up 'SQL databases' or 'networking protocols' when the target topic is 'Data Structures & Algorithms'):
   1. Politely acknowledge their input.
   2. Clarify that today's revision focus is strictly on **{sub_topic}**.
   3. Pivot the conversation back by connecting their comment to **{sub_topic}** (if a logical link exists) OR explicitly redirect them with a probing question about **{sub_topic}**.
 
 TUTORING MANDATE:
 - Guide the student step-by-step using probing questions and constructive hints. 
-- Focus on developing their disciplinary literacy as a Computer Scientist: encourage precise algorithmic complexity notation (Big-O), structural mechanisms, trace logic, register operations, pseudocode standards, and hardware/software architecture trade-offs. 
+- Focus on developing their disciplinary literacy as a Computer Scientist: encourage precise algorithmic complexity notation, structural mechanisms, trace logic, pseudocode conventions, and hardware/software concepts. 
 - Never give away full answers directly."""
 
     llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash")
@@ -104,12 +102,12 @@ Syllabus Context:
 CRITICAL MANDATE: This is the FINAL turn. You MUST NOT ask any follow-up questions. Conclude immediately and provide the performance assessment and summary card.
 
 STRICT FORMATTING & LATEX RULES:
-- NEVER use LaTeX math delimiters like $, $$, \\(, or \\). Write all complexity notation (e.g., O(n log n)), matrices, registers, and variables in plain text or Markdown bold/code.
+- NEVER use LaTeX math delimiters like $, $$, \\(, or \\). Write all complexity, matrices, registers, and variables in plain text or Markdown bold/code.
 
 OBJECTIVE MARKING RUBRIC:
-1. Base accuracy strictly on exact Computer Science specification keywords derived from Syllabus Context.
+1. Base accuracy strictly on exact Computer Science specification keywords derived from the Syllabus Context.
 2. Ignore Setup Words: Do not count the initial topic name chosen by the student as a keyword hit.
-3. Strict Terminology: Only credit official domain terms (e.g., 'Big-O O(log n)', 'stack frame', 'polymorphism', named assembly instructions, Little Man Computer mnemonics). Layperson words get 0% keyword credit.
+3. Strict Terminology: Only credit official domain terms (e.g., 'Big-O O(log n)', 'stack frame', 'polymorphism', named assembly instructions). Layperson words get 0% keyword credit.
 4. Misconception Penalty: Cap the overall score at 20% maximum if the student expresses a fundamental factual error.
 
 INSTRUCTIONS FOR SESSION ENDING:
@@ -204,7 +202,7 @@ Topic Focus: {sub_topic}
 Syllabus Context:
 {context}
 
-Generate exactly 10 short-answer exam questions testing precise definitions, algorithmic mechanisms, assembly/architectural concepts, or data structure operations.
+Generate exactly 10 short-answer exam questions testing precise definitions, algorithmic mechanisms, and hardware/software concepts for this subtopic.
 Output ONLY a valid JSON array of 10 question strings, with no additional text or formatting:
 ["Question 1 text...", "Question 2 text...", ...]"""
 
@@ -291,7 +289,7 @@ Topic: {sub_topic}
 Question: {question}
 Student Response: {student_answer}
 
-Evaluate based on Computer Science disciplinary literacy: structural logic, algorithmic complexity, precise terminology, and trade-off analysis (AO1 knowledge, AO2 application, AO3 evaluation).
+Evaluate based on Computer Science disciplinary literacy: structural logic, algorithmic complexity, precise terminology, and trade-off analysis.
 
 Return a JSON object:
 {{
