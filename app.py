@@ -1,10 +1,26 @@
-import streamlit as st
-import re, json, os
 import importlib
+import json
+import os
+import re
+from langchain_core.messages import AIMessage, HumanMessage
+import streamlit as st
+
+# Ensure API Key is set BEFORE loading socratic_fsm
+if "GOOGLE_API_KEY" in st.secrets:
+    os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+
 import socratic_fsm
 importlib.reload(socratic_fsm)
-from socratic_fsm import workflow
-from langchain_core.messages import HumanMessage, AIMessage
+
+from socratic_fsm import (
+    workflow,
+    generate_quiz_questions,
+    evaluate_quiz_answers,
+    generate_extended_question,
+    grade_extended_response,
+    generate_layman_transformation_prompt,
+    grade_disciplinary_rewrite
+)
 
 # --- Load Dynamic Course Spec ---
 SPEC_PATH = "course_spec.json"
@@ -13,16 +29,23 @@ if os.path.exists(SPEC_PATH):
         COURSE_SPEC = json.load(f)
 else:
     COURSE_SPEC = {
-        "course_title": "Socratic Learning Assistant",
-        "level": "GCSE",
-        "target_turns": 5,
+        "course_title": "OCR A-Level Computer Science",
+        "level": "A-Level",
+        "target_turns": 7,
         "topics": {"General": ["General Practice"]}
     }
 
-COURSE_TITLE = COURSE_SPEC.get("course_title", "Socratic Coach")
-LEVEL = COURSE_SPEC.get("level", "GCSE/A-Level")
-TARGET_TURNS = COURSE_SPEC.get("target_turns", 5)
-TOPICS = COURSE_SPEC.get("topics", {})
+COURSE_TITLE = COURSE_SPEC.get("course_title", "OCR A-Level Computer Science")
+LEVEL = COURSE_SPEC.get("level", "A-Level")
+TARGET_TURNS = COURSE_SPEC.get("target_turns", 7)
+
+# --- COLOR THEME CONFIGURATION: OPTION SUBJECT (Forest & Emerald Green) ---
+THEME_PRIMARY = "#059669"        # Emerald Green for primary buttons, borders, and progress bars
+THEME_GRADIENT_START = "#065f46"  # Dark Forest Green Header Start
+THEME_GRADIENT_END = "#059669"    # Emerald Green Header End
+THEME_BANNER_BG = "#ecfdf5"       # Light Emerald Purpose Banner
+THEME_BANNER_BORDER = "#a7f3d0"   # Soft Emerald Border
+THEME_BANNER_TEXT = "#065f46"     # Dark Emerald Banner Text
 
 # --- Helpers ---
 def extract_clean_text(response) -> str:
@@ -60,49 +83,90 @@ def md_to_html(text: str) -> str:
     text = text.replace('\n', '<br>')
     return re.sub(r'(<br\s*/?>\s*)+', '<br>', text)
 
-# --- CSS Styling ---
-st.markdown("""
+# --- CSS Styling (Option Green & Tech High Visibility Override) ---
+st.markdown(f"""
     <style>
-    .stApp { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); }
-    div[data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
-    div[data-testid="stProgress"] > div > div > div { background-color: #22c55e !important; }
-    h1, h2, h3 { color: #0f172a; font-family: 'Inter', sans-serif; font-weight: 700; }
-    .chat-header { 
-        background: linear-gradient(135deg, #0f172a 0%, #2563eb 100%); 
+    .stApp {{ background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); }}
+    div[data-testid="stSidebar"] {{ background-color: #ffffff; border-right: 1px solid #e2e8f0; }}
+    div[data-testid="stProgress"] > div > div > div {{ background-color: {THEME_PRIMARY} !important; }}
+    h1, h2, h3 {{ color: #0f172a; font-family: 'Inter', sans-serif; font-weight: 700; }}
+    .chat-header {{ 
+        background: linear-gradient(135deg, {THEME_GRADIENT_START} 0%, {THEME_GRADIENT_END} 100%); 
         color: white; padding: 22px; font-weight: 700; text-align: center; 
-        font-size: 1.3em; border-radius: 16px; box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.25);
-        margin-bottom: 24px;
-    }
-    .selection-card {
-        background: #ffffff; padding: 24px; border-radius: 16px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border: 1px solid #e2e8f0; margin-bottom: 20px;
-    }
-    .tutor-msg { 
+        font-size: 1.3em; border-radius: 16px; box-shadow: 0 10px 15px -3px rgba(5, 150, 105, 0.25);
+        margin-bottom: 20px;
+    }}
+    .purpose-banner {{
+        background: {THEME_BANNER_BG}; border: 1px solid {THEME_BANNER_BORDER}; padding: 14px 18px;
+        border-radius: 12px; color: {THEME_BANNER_TEXT}; font-size: 0.95em; margin-bottom: 20px;
+        line-height: 1.4;
+    }}
+    .tutor-msg {{ 
         background-color: #ffffff; color: #1e293b; padding: 14px 18px; 
         border-radius: 18px 18px 18px 4px; margin-bottom: 12px; max-width: 82%; 
         line-height: 1.35; border: 1px solid #e2e8f0;
-    }
-    .student-msg { 
-        background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%); 
+    }}
+    .student-msg {{ 
+        background: linear-gradient(135deg, {THEME_GRADIENT_START} 0%, {THEME_GRADIENT_END} 100%); 
         color: white; padding: 14px 18px; border-radius: 18px 18px 4px 18px; 
         margin-bottom: 12px; max-width: 82%; margin-left: auto; line-height: 1.35;
-    }
-    .summary-box { 
+    }}
+    .summary-box {{ 
         background: #fefce8; border-left: 5px solid #eab308; padding: 10px 14px; 
         border-radius: 12px; color: #713f12; font-size: 0.93em; margin: 8px 0; max-width: 85%; 
-    }
-    .stButton > button { border-radius: 12px !important; font-weight: 600 !important; }
+    }}
+    .stButton > button {{ border-radius: 12px !important; font-weight: 600 !important; margin-top: 4px !important; margin-bottom: 4px !important; }}
+    button[kind="primary"] {{
+        background-color: {THEME_PRIMARY} !important;
+        border-color: {THEME_PRIMARY} !important;
+    }}
+    /* Persistent Solid White Background & High Contrast Border for Text Areas */
+    div[data-baseweb="textarea"], 
+    div[data-baseweb="textarea"] > div,
+    textarea {{
+        background-color: #ffffff !important;
+    }}
+    div[data-baseweb="textarea"] {{
+        border: 2px solid {THEME_PRIMARY} !important;
+        border-radius: 10px !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
+    }}
+    div[data-baseweb="textarea"]:focus-within {{
+        border-color: {THEME_GRADIENT_START} !important;
+        box-shadow: 0 0 0 3px rgba(6, 95, 70, 0.3) !important;
+    }}
+    textarea {{
+        color: #0f172a !important;
+        font-size: 1rem !important;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
-# --- Session State ---
+# --- Session State Initialisation ---
 if "active_unit" not in st.session_state:
     st.session_state.active_unit = None
 if "active_topic" not in st.session_state:
     st.session_state.active_topic = None
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
+if "quiz_questions" not in st.session_state:
+    st.session_state.quiz_questions = None
+if "quiz_feedback" not in st.session_state:
+    st.session_state.quiz_feedback = None
+if "extended_question" not in st.session_state:
+    st.session_state.extended_question = None
+if "extended_results" not in st.session_state:
+    st.session_state.extended_results = None
+if "submitted_extended_answer" not in st.session_state:
+    st.session_state.submitted_extended_answer = ""
+if "rewrite_data" not in st.session_state:
+    st.session_state.rewrite_data = None
+if "rewrite_results" not in st.session_state:
+    st.session_state.rewrite_results = None
+if "student_rewrite_submission" not in st.session_state:
+    st.session_state.student_rewrite_submission = ""
 
 if "graph_state" not in st.session_state:
     st.session_state.graph_state = {
@@ -115,49 +179,106 @@ if "graph_state" not in st.session_state:
 def reset_session():
     st.session_state.active_unit = None
     st.session_state.active_topic = None
+    st.session_state.app_mode = None
     st.session_state.messages = []
+    st.session_state.quiz_questions = None
+    st.session_state.quiz_feedback = None
+    st.session_state.extended_question = None
+    st.session_state.extended_results = None
+    st.session_state.submitted_extended_answer = ""
+    st.session_state.rewrite_data = None
+    st.session_state.rewrite_results = None
+    st.session_state.student_rewrite_submission = ""
     st.session_state.graph_state = {
         "messages": [], "sub_topic": None, "turn_count": 0, "is_final_turn": False
     }
     st.rerun()
 
-# --- Screen Router (2-Tier UI) ---
+# --- Dynamic Screen Router ---
 if st.session_state.active_topic is None:
-    st.markdown(f'<div class="chat-header">🎓 {COURSE_TITLE} Socratic Coach</div>', unsafe_allow_html=True)
-    st.markdown('<div class="selection-card">', unsafe_allow_html=True)
-    st.subheader("🎯 Select Revision Target")
-    st.write("Choose a unit and subtopic to begin your practice session:")
+    st.markdown(f'<div class="chat-header">💻 {COURSE_TITLE} Socratic Coach</div>', unsafe_allow_html=True)
     
-    # 2-Tier Selection: Unit -> Subtopic
-    unit_keys = list(TOPICS.keys()) if TOPICS else ["General"]
-    selected_unit = st.selectbox("📘 Step 1: Choose Unit / Component:", options=unit_keys)
+    st.markdown("""
+        <div class="purpose-banner">
+            💡 <b>App Purpose:</b> The aim of this app is to help you develop your use of disciplinary literacy. 
+            To gain a top grade in Computer Science, you need to think, trace, and write like a Computer Scientist!
+        </div>
+    """, unsafe_allow_html=True)
     
-    subtopic_options = TOPICS.get(selected_unit, [])
-    if not subtopic_options:
-        subtopic_options = [selected_unit]
+    st.subheader("⚙️ Select Revision Target")
     
-    selected_subtopic = st.selectbox("🔍 Step 2: Choose Specific Subtopic:", options=subtopic_options)
+    raw_structure = COURSE_SPEC.get("subjects") or COURSE_SPEC.get("topics", {})
+    first_key = next(iter(raw_structure), None)
+    is_three_tier = isinstance(raw_structure.get(first_key), dict) if first_key else False
+
+    if is_three_tier:
+        st.write("Choose a paper, section, and subtopic to begin your practice session:")
+        sel_subject = st.selectbox("🖥️ Step 1: Choose Component / Paper:", options=list(raw_structure.keys()))
+        units_dict = raw_structure.get(sel_subject, {})
+        sel_unit = st.selectbox("📘 Step 2: Choose Section / Unit:", options=list(units_dict.keys()))
+        subtopics = units_dict.get(sel_unit, [])
+        sel_subtopic = st.selectbox("🔍 Step 3: Choose Specific Subtopic:", options=subtopics)
+        
+        target_unit_name = sel_unit
+        target_subtopic_name = sel_subtopic
+        full_query = f"{sel_subject} - {sel_unit}: {sel_subtopic}"
+    else:
+        st.write("Choose a unit and subtopic to begin your practice session:")
+        sel_unit = st.selectbox("📘 Step 1: Choose Unit / Component:", options=list(raw_structure.keys()))
+        subtopics = raw_structure.get(sel_unit, [])
+        sel_subtopic = st.selectbox("🔍 Step 2: Choose Specific Subtopic:", options=subtopics)
+        
+        target_unit_name = sel_unit
+        target_subtopic_name = sel_subtopic
+        full_query = sel_subtopic
 
     st.write("")
-    if st.button("🚀 Start Socratic Session", type="primary", use_container_width=True):
-        st.session_state.active_unit = selected_unit
-        st.session_state.active_topic = selected_subtopic
-        st.session_state.graph_state["sub_topic"] = selected_subtopic
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
-else:
-    st.markdown(f'<div class="chat-header">🎓 {COURSE_TITLE} Coach</div>', unsafe_allow_html=True)
+    # 4 CS Action Buttons with Tech Icons
+    if st.button("🤖 Start a Socratic Session", type="primary", use_container_width=True):
+        st.session_state.app_mode = "socratic"
+        st.session_state.active_unit = target_unit_name
+        st.session_state.active_topic = target_subtopic_name
+        st.session_state.graph_state["sub_topic"] = full_query
+        st.rerun()
+
+    if st.button("📑 Take a Retrieval Quiz", use_container_width=True):
+        st.session_state.app_mode = "quiz"
+        st.session_state.active_unit = target_unit_name
+        st.session_state.active_topic = target_subtopic_name
+        with st.spinner("Generating specification retrieval questions..."):
+            st.session_state.quiz_questions = generate_quiz_questions(
+                full_query, COURSE_TITLE, LEVEL
+            )
+        st.rerun()
+
+    if st.button("⚡ Answer an Extended Question", use_container_width=True):
+        st.session_state.app_mode = "extended"
+        st.session_state.active_unit = target_unit_name
+        st.session_state.active_topic = target_subtopic_name
+        with st.spinner("Generating high-tier extended response scenario..."):
+            st.session_state.extended_question = generate_extended_question(full_query, COURSE_TITLE, LEVEL)
+        st.rerun()
+
+    if st.button("🛠️ Rewrite an Answer", use_container_width=True):
+        st.session_state.app_mode = "rewrite"
+        st.session_state.active_unit = target_unit_name
+        st.session_state.active_topic = target_subtopic_name
+        with st.spinner("Generating informal response scenario..."):
+            st.session_state.rewrite_data = generate_layman_transformation_prompt(full_query, COURSE_TITLE, LEVEL)
+        st.rerun()
+
+# --- Socratic Mode View ---
+elif st.session_state.app_mode == "socratic":
+    st.markdown(f'<div class="chat-header">🤖 {COURSE_TITLE} Coach</div>', unsafe_allow_html=True)
     
     student_turns = sum(1 for m in st.session_state.messages if m.get("role") == "student")
 
     with st.sidebar:
         st.subheader("📌 Active Target")
         st.info(f"**Unit:** {st.session_state.active_unit}\n\n**Topic:** {st.session_state.active_topic}")
-        
         st.metric(label="Turn Counter", value=f"{student_turns} / {TARGET_TURNS}")
         st.progress(min(student_turns / TARGET_TURNS, 1.0))
-        
         st.write("---")
         if st.button("🔄 New Session / Change Topic", use_container_width=True):
             reset_session()
@@ -165,7 +286,7 @@ else:
     if len(st.session_state.messages) == 0:
         initial_greeting = (
             f"Welcome! We're exploring **{st.session_state.active_topic}** today. "
-            f"To get started, what core concept or term in this topic would you like to review?"
+            f"To get started, what key data structure, algorithm, hardware principle, or theory concept would you like to review?"
         )
         st.session_state.messages.append({"role": "tutor", "content": initial_greeting, "style": "tutor-msg"})
         st.session_state.graph_state["messages"].append(AIMessage(content=initial_greeting))
@@ -193,9 +314,7 @@ else:
         st.session_state.graph_state["turn_count"] = current_student_turns
         st.session_state.graph_state["is_final_turn"] = (current_student_turns >= TARGET_TURNS)
 
-
         with st.spinner("Analyzing response and generating feedback..."):
-        # Always pass the full list of Human/AI objects clean from graph_state
             input_payload = {
                 "messages": st.session_state.graph_state["messages"],
                 "sub_topic": st.session_state.active_topic,
@@ -216,3 +335,188 @@ else:
 
         st.session_state.graph_state = updated_state
         st.rerun()
+
+# --- Quiz Mode View ---
+elif st.session_state.app_mode == "quiz":
+    st.markdown(f'<div class="chat-header">📑 {COURSE_TITLE} Retrieval Quiz</div>', unsafe_allow_html=True)
+    
+    with st.sidebar:
+        st.subheader("📌 Active Target")
+        st.info(f"**Unit:** {st.session_state.active_unit}\n\n**Topic:** {st.session_state.active_topic}")
+        st.write("---")
+        if st.button("🔄 Change Topic / Mode", use_container_width=True):
+            reset_session()
+
+    questions = st.session_state.get("quiz_questions")
+    
+    if questions:
+        if st.session_state.quiz_feedback is None:
+            with st.form("retrieval_quiz_form"):
+                st.subheader(f"Practice Quiz: {st.session_state.active_topic}")
+                user_answers = {}
+                for idx, q in enumerate(questions, 1):
+                    q_text = q.get("question", q) if isinstance(q, dict) else q
+                    st.markdown(f"**Q{idx}: {q_text}**")
+                    user_answers[idx] = st.text_input(f"Your Answer for Q{idx}:", key=f"quiz_ans_{idx}")
+                    st.write("")
+                
+                submitted = st.form_submit_button("Submit Quiz for Feedback", type="primary", use_container_width=True)
+                
+                if submitted:
+                    with st.spinner("Evaluating your responses against specification mark schemes..."):
+                        feedback = evaluate_quiz_answers(
+                            questions=questions,
+                            user_answers=user_answers,
+                            topic=st.session_state.active_topic,
+                            course_title=COURSE_TITLE,
+                            level=LEVEL
+                        )
+                        st.session_state.quiz_feedback = feedback
+                        st.rerun()
+        else:
+            feedback_data = st.session_state.quiz_feedback
+            total_score = feedback_data.get("total_score", 0)
+            breakdown = feedback_data.get("breakdown", [])
+            total_questions = len(breakdown) if breakdown else len(questions)
+
+            st.success(f"🎉 **Quiz Complete! Total Score: {total_score} / {total_questions}**\n\nReview your keyword accuracy breakdown below:")
+            st.write("")
+
+            for item in breakdown:
+                q_num = item.get("question_num", "")
+                q_text = item.get("question", "")
+                score = item.get("score", 0)
+                user_ans = item.get("student_answer", "No answer provided")
+                model_ans = item.get("model_answer", "")
+                used = ", ".join(item.get("keywords_used", [])) or "None"
+                missed = ", ".join(item.get("keywords_missed", [])) or "None"
+                explanation = item.get("explanation", "")
+
+                label = f"Q{q_num}: {q_text} — Score: {score}/1"
+                
+                with st.expander(label, expanded=False):
+                    st.markdown(f"**Your Answer:**\n\n> {user_ans}")
+                    st.markdown(f"**Model Answer:** {model_ans}")
+                    st.markdown(f"**Key Terms Used:** {used}")
+                    st.markdown(f"**Missed Keywords:** {missed}")
+                    st.info(f"💡 **Examiner Note:** {explanation}")
+
+            st.write("")
+            if st.button("🔄 Retake Quiz / Try Another Topic", type="primary", use_container_width=True):
+                reset_session()
+    else:
+        st.error("No questions were generated. Please return and select a topic again.")
+        if st.button("Back to Selection Screen"):
+            reset_session()
+
+# --- Extended Question Mode View ---
+elif st.session_state.app_mode == "extended":
+    st.markdown(f'<div class="chat-header">⚡ {COURSE_TITLE} Extended Question</div>', unsafe_allow_html=True)
+    
+    with st.sidebar:
+        st.subheader("📌 Active Target")
+        st.info(f"**Unit:** {st.session_state.active_unit}\n\n**Topic:** {st.session_state.active_topic}")
+        st.write("---")
+        if st.button("🔄 Change Topic / Mode", use_container_width=True):
+            reset_session()
+
+    q_text = st.session_state.get("extended_question")
+    
+    if q_text:
+        if st.session_state.extended_results is None:
+            st.subheader("Extended Response Challenge")
+            st.markdown(f"**Question:** {q_text}")
+            
+            user_response = st.text_area("Write your detailed evaluation below (include trade-off analysis and technical terms):", height=200)
+            
+            if st.button("Submit Extended Answer", type="primary", use_container_width=True):
+                if user_response.strip():
+                    st.session_state.submitted_extended_answer = user_response.strip()
+                    with st.spinner("Evaluating disciplinary literacy and complexity analysis..."):
+                        results = grade_extended_response(
+                            sub_topic=st.session_state.active_topic,
+                            question=q_text,
+                            student_answer=user_response.strip(),
+                            course_title=COURSE_TITLE,
+                            level=LEVEL
+                        )
+                        st.session_state.extended_results = results
+                        st.rerun()
+                else:
+                    st.warning("Please type an answer before submitting.")
+        else:
+            res = st.session_state.extended_results
+            
+            # Display Question & Submitted Response prominent at the top
+            with st.expander("📝 Your Submitted Extended Answer", expanded=True):
+                st.markdown(f"**Question:** {q_text}")
+                st.markdown(f"**Your Answer:**\n\n> {st.session_state.get('submitted_extended_answer', '')}")
+
+            st.success(f"🎉 **Evaluation Complete! Score: {res.get('score', 0)} / {res.get('max_score', 9)} ({res.get('disciplinary_level', 'Developing')})**")
+            
+            st.markdown(f"**Strengths:** {res.get('strengths', '')}")
+            st.markdown(f"**Key Terms Used:** {', '.join(res.get('keywords_used', [])) or 'None'}")
+            st.markdown(f"**Missed Key Terms:** {', '.join(res.get('keywords_missed', [])) or 'None'}")
+            st.info(f"💡 **Advice for Improvement:** {res.get('struggle_advice', '')}")
+            
+            with st.expander("📖 View Exemplar Top-Band Model Answer"):
+                st.markdown(res.get("model_answer", ""))
+                
+            st.write("")
+            if st.button("🔄 Try Another Question / Topic", type="primary", use_container_width=True):
+                reset_session()
+
+# --- Rewrite Mode View ---
+elif st.session_state.app_mode == "rewrite":
+    st.markdown(f'<div class="chat-header">🛠️ {COURSE_TITLE} Disciplinary Rewrite</div>', unsafe_allow_html=True)
+    
+    with st.sidebar:
+        st.subheader("📌 Active Target")
+        st.info(f"**Unit:** {st.session_state.active_unit}\n\n**Topic:** {st.session_state.active_topic}")
+        st.write("---")
+        if st.button("🔄 Change Topic / Mode", use_container_width=True):
+            reset_session()
+
+    r_data = st.session_state.get("rewrite_data")
+    
+    if r_data:
+        if st.session_state.rewrite_results is None:
+            st.subheader("Upgrade Informal Answer Challenge")
+            st.markdown(f"**Question:** {r_data.get('question')}")
+            st.warning(f"**Informal Student Draft:**\n\n\"{r_data.get('layman_answer')}\"")
+            
+            student_rewrite = st.text_area("Rewrite this response using precise Computer Science terminology and complexity notation:", height=180)
+            
+            if st.button("Submit Upgraded Rewrite", type="primary", use_container_width=True):
+                if student_rewrite.strip():
+                    st.session_state.student_rewrite_submission = student_rewrite.strip()
+                    with st.spinner("Grading terminology upgrade..."):
+                        results = grade_disciplinary_rewrite(
+                            sub_topic=st.session_state.active_topic,
+                            question=r_data.get('question'),
+                            layman_answer=r_data.get('layman_answer'),
+                            student_rewrite=student_rewrite.strip(),
+                            course_title=COURSE_TITLE,
+                            level=LEVEL
+                        )
+                        st.session_state.rewrite_results = results
+                        st.rerun()
+                else:
+                    st.warning("Please type a rewrite before submitting.")
+        else:
+            res = st.session_state.rewrite_results
+            st.success(f"🎉 **Rewrite Graded! Score: {res.get('score', 0)} / {res.get('max_score', 4)}**")
+            
+            with st.expander("📌 View Question & Your Submission", expanded=True):
+                st.markdown(f"**Question:** {r_data.get('question')}")
+                st.markdown(f"**Original Informal Draft:** *\"{r_data.get('layman_answer')}\"*")
+                st.markdown(f"**Your Upgraded Rewrite:**\n\n> {st.session_state.student_rewrite_submission}")
+            
+            st.write("")
+            st.markdown(f"**Technical Terms Added:** {', '.join(res.get('key_terms_used', [])) or 'None'}")
+            st.markdown(f"**Missed Terms:** {', '.join(res.get('missed_terms', [])) or 'None'}")
+            st.info(f"💡 **Examiner Note:** {res.get('feedback', '')}")
+            
+            st.write("")
+            if st.button("🔄 Try Another Rewrite / Topic", type="primary", use_container_width=True):
+                reset_session()
